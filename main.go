@@ -44,6 +44,7 @@ type model struct {
 	start  time.Time
 	end    time.Time
 	width  int
+	height int
 }
 
 func (m model) Init() tea.Cmd {
@@ -54,6 +55,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.Type {
@@ -62,6 +64,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyTab:
 			nm := newModel()
 			nm.width = m.width
+			nm.height = m.height
 			return nm, nil
 		}
 		if m.finished() {
@@ -185,13 +188,17 @@ func (m model) View() string {
 		}
 		col++
 	}
-	b.WriteString("\n\n")
+	text := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Left, b.String())
+	var out strings.Builder
+	out.WriteString(text)
+	out.WriteString("\n\n")
 	if m.finished() {
-		b.WriteString(statsStyle.Render(fmt.Sprintf("wpm: %.0f acc: %.1f%%", m.wpm(), m.accuracy())))
-		b.WriteString("\n\n")
+		out.WriteString(statsStyle.Render(fmt.Sprintf("wpm: %.0f acc: %.1f%%", m.wpm(), m.accuracy())))
+		out.WriteString("\n\n")
 	}
-	b.WriteString(pendingStyle.Render("tab to restart • esc to quit"))
-	return b.String()
+	out.WriteString(pendingStyle.Render("tab to restart • esc to quit"))
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, out.String())
 }
 
 func newModel() model {
