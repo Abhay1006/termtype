@@ -43,6 +43,7 @@ type model struct {
 	input  string
 	start  time.Time
 	end    time.Time
+	width  int
 }
 
 func (m model) Init() tea.Cmd {
@@ -51,12 +52,17 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyEsc, tea.KeyCtrlC:
 			return m, tea.Quit
 		case tea.KeyTab:
-			return newModel(), nil
+			nm := newModel()
+			nm.width = m.width
+			return nm, nil
 		}
 		if m.finished() {
 			return m, nil
@@ -128,6 +134,13 @@ func (m model) accuracy() float64 {
 	return float64(m.correctChars()) / float64(total) * 100
 }
 
+func (m model) wrapWidth() int {
+	if m.width <= 0 {
+		return 60
+	}
+	return min(m.width, 60)
+}
+
 var (
 	correctStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	wrongStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Underline(true)
@@ -142,7 +155,19 @@ func (m model) View() string {
 	input := []rune(m.input)
 
 	var b strings.Builder
+	maxWidth := m.wrapWidth()
+	col := 0
 	for i, t := range target {
+		if i == 0 || target[i-1] == ' ' {
+			wordLen := 0
+			for j := i; j < len(target) && target[j] != ' '; j++ {
+				wordLen++
+			}
+			if col > 0 && col+wordLen+1 > maxWidth {
+				b.WriteString("\n")
+				col = 0
+			}
+		}
 		ch := string(t)
 		switch {
 		case i < len(input) && input[i] == t:
@@ -158,6 +183,7 @@ func (m model) View() string {
 		default:
 			b.WriteString(pendingStyle.Render(ch))
 		}
+		col++
 	}
 	b.WriteString("\n\n")
 	if m.finished() {
