@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"time"
@@ -9,6 +10,33 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+var words = []string{
+	"the", "be", "of", "and", "a", "to", "in", "he", "have", "it",
+	"that", "for", "they", "with", "as", "not", "on", "she", "at", "by",
+	"this", "we", "you", "do", "but", "from", "or", "which", "one", "would",
+	"all", "will", "there", "say", "who", "make", "when", "can", "more", "if",
+	"no", "man", "out", "other", "so", "what", "time", "up", "go", "about",
+	"than", "into", "could", "state", "only", "new", "year", "some", "take", "come",
+	"these", "know", "see", "use", "get", "like", "then", "first", "any", "work",
+	"now", "may", "such", "give", "over", "think", "most", "even", "find", "day",
+	"also", "after", "way", "many", "must", "look", "before", "great", "back", "through",
+	"long", "where", "much", "should", "well", "people", "down", "own", "just", "because",
+	"good", "each", "those", "feel", "seem", "how", "high", "too", "place", "little",
+	"world", "very", "still", "nation", "hand", "old", "life", "tell", "write", "become",
+	"here", "show", "house", "both", "between", "need", "mean", "call", "develop", "under",
+	"last", "right", "move", "thing", "general", "school", "never", "same", "another", "begin",
+	"while", "number", "part", "turn", "real", "leave", "might", "want", "point", "form",
+	"off", "child", "few", "small", "since", "against", "ask", "late", "home", "interest",
+}
+
+func randomText(n int) string {
+	picked := make([]string, n)
+	for i := range picked {
+		picked[i] = words[rand.IntN(len(words))]
+	}
+	return strings.Join(picked, " ")
+}
 
 type model struct {
 	target string
@@ -24,12 +52,17 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if m.finished() && msg.Type != tea.KeyEsc && msg.Type != tea.KeyCtrlC {
-			return m, nil
-		}
 		switch msg.Type {
 		case tea.KeyEsc, tea.KeyCtrlC:
 			return m, tea.Quit
+		case tea.KeyTab:
+			return newModel(), nil
+		}
+		if m.finished() {
+			return m, nil
+		}
+
+		switch msg.Type {
 		case tea.KeyBackspace:
 			r := []rune(m.input)
 			if len(r) > 0 {
@@ -80,11 +113,11 @@ func (m model) correctChars() int {
 }
 
 func (m model) wpm() float64 {
-	mintues := m.end.Sub(m.start).Minutes()
-	if mintues == 0 {
+	minutes := m.end.Sub(m.start).Minutes()
+	if minutes == 0 {
 		return 0
 	}
-	return float64(m.correctChars()) / 5 / mintues
+	return float64(m.correctChars()) / 5 / minutes
 }
 
 func (m model) accuracy() float64 {
@@ -131,13 +164,16 @@ func (m model) View() string {
 		b.WriteString(statsStyle.Render(fmt.Sprintf("wpm: %.0f acc: %.1f%%", m.wpm(), m.accuracy())))
 		b.WriteString("\n\n")
 	}
-	b.WriteString(pendingStyle.Render("esc to quit"))
+	b.WriteString(pendingStyle.Render("tab to restart • esc to quit"))
 	return b.String()
 }
 
+func newModel() model {
+	return model{target: randomText(25)}
+}
+
 func main() {
-	m := model{target: "the quick brown fox"}
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(newModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("error:", err)
 		os.Exit(1)
