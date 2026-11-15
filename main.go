@@ -27,6 +27,9 @@ func randomText(n int) string {
 
 const testDuration = 30 * time.Second
 
+// visibleLines is how many lines of the text are shown at once.
+const visibleLines = 3
+
 type tickMsg struct{ id int }
 
 func tick(id int) tea.Cmd {
@@ -180,8 +183,10 @@ func (m model) View() string {
 	target := []rune(m.target)
 	input := []rune(m.input)
 
+	var lines []string
 	var b strings.Builder
 	maxWidth := m.wrapWidth()
+	cursorLine := -1
 	col := 0
 	for i, t := range target {
 		if i == 0 || target[i-1] == ' ' {
@@ -190,9 +195,13 @@ func (m model) View() string {
 				wordLen++
 			}
 			if col > 0 && col+wordLen+1 > maxWidth {
-				b.WriteString("\n")
+				lines = append(lines, b.String())
+				b.Reset()
 				col = 0
 			}
+		}
+		if i == len(input) {
+			cursorLine = len(lines)
 		}
 		ch := string(t)
 		switch {
@@ -211,7 +220,21 @@ func (m model) View() string {
 		}
 		col++
 	}
-	text := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Left, b.String())
+	lines = append(lines, b.String())
+	if cursorLine < 0 {
+		cursorLine = len(lines) - 1
+	}
+
+	// Show only a few lines: keep the cursor on the second line once
+	// the first line is done, so upcoming text is always visible.
+	start := max(0, cursorLine-1)
+	start = min(start, max(0, len(lines)-visibleLines))
+	end := min(len(lines), start+visibleLines)
+	shown := lines[start:end]
+	for len(shown) < visibleLines {
+		shown = append(shown, "")
+	}
+	text := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Left, strings.Join(shown, "\n"))
 	var out strings.Builder
 	if !m.finished() {
 		out.WriteString(statsStyle.Render(fmt.Sprintf("%d", m.timeLeft())))
