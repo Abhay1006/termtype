@@ -38,6 +38,16 @@ func randomText(n int) string {
 	return strings.Join(picked, " ")
 }
 
+const testDuration = 30 * time.Second
+
+type tickMsg struct{ id int }
+
+func tick(id int) tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return tickMsg{id: id}
+	})
+}
+
 type model struct {
 	target string
 	input  string
@@ -45,6 +55,7 @@ type model struct {
 	end    time.Time
 	width  int
 	height int
+	id     int
 }
 
 func (m model) Init() tea.Cmd {
@@ -57,6 +68,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+	case tickMsg:
+		if msg.id != m.id || m.finished() {
+			return m, nil
+		}
+		if time.Since(m.start) >= testDuration {
+			m.end = m.start.Add(testDuration)
+			return m, nil
+		}
+		return m, tick(m.id)
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyEsc, tea.KeyCtrlC:
@@ -65,11 +85,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			nm := newModel()
 			nm.width = m.width
 			nm.height = m.height
+			nm.id = m.id + 1
 			return nm, nil
 		}
 		if m.finished() {
 			return m, nil
 		}
+		wasIdle := m.start.IsZero()
 
 		switch msg.Type {
 		case tea.KeyBackspace:
@@ -81,6 +103,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.addChars(" ")
 		case tea.KeyRunes:
 			m = m.addChars(string(msg.Runes))
+		}
+		if wasIdle && !m.start.IsZero() {
+			return m, tick(m.id)
 		}
 	}
 	return m, nil
@@ -137,6 +162,17 @@ func (m model) accuracy() float64 {
 	return float64(m.correctChars()) / float64(total) * 100
 }
 
+func (m model) timeLeft() int {
+	if m.start.IsZero() {
+		return int(testDuration.Seconds())
+	}
+	remaining := testDuration - time.Since(m.start)
+	if remaining < 0 {
+		return 0
+	}
+	return int((remaining + time.Second - 1) / time.Second)
+}
+
 func (m model) wrapWidth() int {
 	if m.width <= 0 {
 		return 60
@@ -190,6 +226,10 @@ func (m model) View() string {
 	}
 	text := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Left, b.String())
 	var out strings.Builder
+	if !m.finished() {
+		out.WriteString(statsStyle.Render(fmt.Sprintf("%d", m.timeLeft())))
+		out.WriteString("\n\n")
+	}
 	out.WriteString(text)
 	out.WriteString("\n\n")
 	if m.finished() {
