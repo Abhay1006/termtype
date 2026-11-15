@@ -155,7 +155,7 @@ func (m model) wpm() float64 {
 }
 
 func (m model) accuracy() float64 {
-	total := len([]rune(m.target))
+	total := len([]rune(m.input))
 	if total == 0 {
 		return 0
 	}
@@ -242,7 +242,7 @@ func (m model) View() string {
 }
 
 func newModel() model {
-	return model{target: randomText(25)}
+	return model{target: randomText(100)}
 }
 
 func main() {
