@@ -2,9 +2,12 @@ package main
 
 import (
 	_ "embed"
+	"flag"
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,10 +28,43 @@ func randomText(n int) string {
 	return strings.Join(picked, " ")
 }
 
-const testDuration = 30 * time.Second
-
 // visibleLines is how many lines of the text are shown at once.
 const visibleLines = 3
+
+type testMode int
+
+const (
+	modeTime testMode = iota
+	modeWords
+)
+
+var (
+	timeOptions = []int{15, 30, 60}
+	wordOptions = []int{10, 25, 50}
+)
+
+// settings is the test configuration. It survives restarts.
+type settings struct {
+	mode    testMode
+	seconds int
+	words   int
+}
+
+func (s settings) duration() time.Duration {
+	return time.Duration(s.seconds) * time.Second
+}
+
+// cycle returns the option after (dir=1) or before (dir=-1) cur.
+func cycle(opts []int, cur, dir int) int {
+	i := slices.Index(opts, cur)
+	if i < 0 {
+		if dir > 0 {
+			return opts[0]
+		}
+		return opts[len(opts)-1]
+	}
+	return opts[(i+dir+len(opts))%len(opts)]
+}
 
 type tickMsg struct{ id int }
 
@@ -39,6 +75,7 @@ func tick(id int) tea.Cmd {
 }
 
 type model struct {
+	cfg    settings
 	target string
 	input  string
 	start  time.Time
@@ -52,6 +89,16 @@ func (m model) Init() tea.Cmd {
 	return nil
 }
 
+// restart returns a fresh test with the given settings, keeping the
+// window size and invalidating any running tick chain.
+func (m model) restart(cfg settings) model {
+	nm := newModel(cfg)
+	nm.width = m.width
+	nm.height = m.height
+	nm.id = m.id + 1
+	return nm
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -62,8 +109,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.id != m.id || m.finished() {
 			return m, nil
 		}
-		if time.Since(m.start) >= testDuration {
-			m.end = m.start.Add(testDuration)
+		if m.cfg.mode == modeTime && time.Since(m.start) >= m.cfg.duration() {
+			m.end = m.start.Add(m.cfg.duration())
 			return m, nil
 		}
 		return m, tick(m.id)
@@ -72,16 +119,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEsc, tea.KeyCtrlC:
 			return m, tea.Quit
 		case tea.KeyTab:
-			nm := newModel()
-			nm.width = m.width
-			nm.height = m.height
-			nm.id = m.id + 1
-			return nm, nil
+			return m.restart(m.cfg), nil
 		}
 		if m.finished() {
 			return m, nil
 		}
 		wasIdle := m.start.IsZero()
+
+		// Mode and length can only be changed before the test starts.
+		if wasIdle {
+			cfg := m.cfg
+			switch msg.Type {
+			case tea.KeyUp, tea.KeyDown:
+				if cfg.mode == modeTime {
+					cfg.mode = modeWords
+				} else {
+					cfg.mode = modeTime
+				}
+				return m.restart(cfg), nil
+			case tea.KeyLeft, tea.KeyRight:
+				dir := 1
+				if msg.Type == tea.KeyLeft {
+					dir = -1
+				}
+				if cfg.mode == modeTime {
+					cfg.seconds = cycle(timeOptions, cfg.seconds, dir)
+				} else {
+					cfg.words = cycle(wordOptions, cfg.words, dir)
+				}
+				return m.restart(cfg), nil
+			}
+		}
 
 		switch msg.Type {
 		case tea.KeyBackspace:
@@ -108,11 +176,17 @@ func (m model) addChars(s string) model {
 	target := []rune(m.target)
 	in := []rune(m.input)
 	for _, r := range s {
+		// In time mode the text never runs out: add more words when
+		// the cursor gets close to the end.
+		if m.cfg.mode == modeTime && len(target)-len(in) < 100 {
+			target = append(target, []rune(" "+randomText(25))...)
+		}
 		if len(in) >= len(target) {
 			break
 		}
 		in = append(in, r)
 	}
+	m.target = string(target)
 	m.input = string(in)
 	if len(in) == len(target) && m.end.IsZero() {
 		m.end = time.Now()
@@ -136,16 +210,41 @@ func (m model) correctChars() int {
 	return n
 }
 
+func (m model) typedChars() int {
+	return len([]rune(m.input))
+}
+
+// elapsed is how long the test has been running (or ran, once finished).
+func (m model) elapsed() time.Duration {
+	switch {
+	case m.start.IsZero():
+		return 0
+	case m.finished():
+		return m.end.Sub(m.start)
+	}
+	return time.Since(m.start)
+}
+
+// wpm counts only correct characters (net WPM).
 func (m model) wpm() float64 {
-	minutes := m.end.Sub(m.start).Minutes()
+	minutes := m.elapsed().Minutes()
 	if minutes == 0 {
 		return 0
 	}
 	return float64(m.correctChars()) / 5 / minutes
 }
 
+// rawWpm counts every typed character, right or wrong.
+func (m model) rawWpm() float64 {
+	minutes := m.elapsed().Minutes()
+	if minutes == 0 {
+		return 0
+	}
+	return float64(m.typedChars()) / 5 / minutes
+}
+
 func (m model) accuracy() float64 {
-	total := len([]rune(m.input))
+	total := m.typedChars()
 	if total == 0 {
 		return 0
 	}
@@ -154,13 +253,21 @@ func (m model) accuracy() float64 {
 
 func (m model) timeLeft() int {
 	if m.start.IsZero() {
-		return int(testDuration.Seconds())
+		return m.cfg.seconds
 	}
-	remaining := testDuration - time.Since(m.start)
+	remaining := m.cfg.duration() - time.Since(m.start)
 	if remaining < 0 {
 		return 0
 	}
 	return int((remaining + time.Second - 1) / time.Second)
+}
+
+// wordsTyped counts completed words in words mode.
+func (m model) wordsTyped() int {
+	if m.finished() {
+		return m.cfg.words
+	}
+	return strings.Count(m.input, " ")
 }
 
 func (m model) wrapWidth() int {
@@ -177,7 +284,72 @@ var (
 	cursorStyle  = lipgloss.NewStyle().Reverse(true)
 	pendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	statsStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 )
+
+// pick renders s highlighted when on, dimmed otherwise.
+func pick(s string, on bool) string {
+	if on {
+		return statsStyle.Render(s)
+	}
+	return pendingStyle.Render(s)
+}
+
+// modeBar shows the mode and length choices before the test starts.
+func (m model) modeBar() string {
+	isTime := m.cfg.mode == modeTime
+	parts := []string{pick("time", isTime), pick("words", !isTime), pendingStyle.Render("│")}
+	opts, cur := timeOptions, m.cfg.seconds
+	if !isTime {
+		opts, cur = wordOptions, m.cfg.words
+	}
+	for _, o := range opts {
+		parts = append(parts, pick(strconv.Itoa(o), o == cur))
+	}
+	if !slices.Contains(opts, cur) {
+		// A custom length from a command-line flag.
+		parts = append(parts, pick(strconv.Itoa(cur), true))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// statusLine is shown above the text.
+func (m model) statusLine() string {
+	switch {
+	case m.start.IsZero():
+		return m.modeBar()
+	case m.finished():
+		if m.cfg.mode == modeTime {
+			return pendingStyle.Render(fmt.Sprintf("time %d", m.cfg.seconds))
+		}
+		return pendingStyle.Render(fmt.Sprintf("words %d", m.cfg.words))
+	}
+	progress := fmt.Sprintf("%d", m.timeLeft())
+	if m.cfg.mode == modeWords {
+		progress = fmt.Sprintf("%d/%d", m.wordsTyped(), m.cfg.words)
+	}
+	// Too little time has passed in the first second for WPM to mean anything.
+	liveWpm := "-"
+	if m.elapsed() >= time.Second {
+		liveWpm = fmt.Sprintf("%.0f", m.wpm())
+	}
+	live := pendingStyle.Render(liveWpm + " wpm")
+	return statsStyle.Render(progress) + "   " + live
+}
+
+// results is shown below the text once the test is over.
+func (m model) results() string {
+	label := func(s string) string { return pendingStyle.Render(s) }
+	wrong := m.typedChars() - m.correctChars()
+
+	big := label("wpm ") + statsStyle.Render(fmt.Sprintf("%.0f", m.wpm())) +
+		"    " + label("acc ") + statsStyle.Render(fmt.Sprintf("%.1f%%", m.accuracy()))
+	small := label("raw ") + statsStyle.Render(fmt.Sprintf("%.0f", m.rawWpm())) +
+		"    " + label("chars ") + correctStyle.Render(strconv.Itoa(m.correctChars())) +
+		label("/") + errorStyle.Render(strconv.Itoa(wrong)) +
+		"    " + label("time ") + statsStyle.Render(fmt.Sprintf("%.1fs", m.elapsed().Seconds()))
+	return big + "\n" + small
+}
 
 func (m model) View() string {
 	target := []rune(m.target)
@@ -235,28 +407,51 @@ func (m model) View() string {
 		shown = append(shown, "")
 	}
 	text := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Left, strings.Join(shown, "\n"))
+
 	var out strings.Builder
-	if !m.finished() {
-		out.WriteString(statsStyle.Render(fmt.Sprintf("%d", m.timeLeft())))
-		out.WriteString("\n\n")
-	}
+	out.WriteString(m.statusLine())
+	out.WriteString("\n\n")
 	out.WriteString(text)
 	out.WriteString("\n\n")
 	if m.finished() {
-		out.WriteString(statsStyle.Render(fmt.Sprintf("wpm: %.0f acc: %.1f%%", m.wpm(), m.accuracy())))
+		out.WriteString(m.results())
 		out.WriteString("\n\n")
 	}
-	out.WriteString(pendingStyle.Render("tab to restart • esc to quit"))
+	if m.start.IsZero() {
+		out.WriteString(pendingStyle.Render("←/→ length • ↑/↓ mode • tab restart • esc quit"))
+	} else {
+		out.WriteString(pendingStyle.Render("tab to restart • esc to quit"))
+	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, out.String())
 }
 
-func newModel() model {
-	return model{target: randomText(100)}
+func newModel(cfg settings) model {
+	n := cfg.words
+	if cfg.mode == modeTime {
+		// Starting text; more is added while typing.
+		n = 50
+	}
+	return model{cfg: cfg, target: randomText(n)}
 }
 
 func main() {
-	p := tea.NewProgram(newModel(), tea.WithAltScreen())
+	seconds := flag.Int("t", 30, "test length in seconds (time mode)")
+	words := flag.Int("w", 0, "number of words; switches to words mode")
+	flag.Parse()
+
+	if *seconds <= 0 || *words < 0 {
+		fmt.Fprintln(os.Stderr, "termtype: -t must be > 0 and -w must be >= 0")
+		os.Exit(2)
+	}
+
+	cfg := settings{mode: modeTime, seconds: *seconds, words: 25}
+	if *words > 0 {
+		cfg.mode = modeWords
+		cfg.words = *words
+	}
+
+	p := tea.NewProgram(newModel(cfg), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("error:", err)
 		os.Exit(1)
