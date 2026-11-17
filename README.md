@@ -8,8 +8,7 @@ It has timed, word-count and quote modes, live WPM, a per-second WPM graph,
 personal bests saved locally, and colour themes, all in a single binary
 with no runtime dependencies.
 
-<!-- Add a screenshot or GIF here, e.g. recorded with https://github.com/charmbracelet/vhs -->
-<!-- ![termtype demo](docs/demo.gif) -->
+<img width="1080" height="644" alt="termtype demo" src="https://github.com/user-attachments/assets/52ca1488-a477-41c4-9bde-8661f7a69bb4" />
 
 ## Features
 
