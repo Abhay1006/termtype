@@ -12,14 +12,15 @@ import (
 
 // result is one finished test, as stored in history.json.
 type result struct {
-	Date     time.Time `json:"date"`
-	Mode     string    `json:"mode"`   // "time", "words" or "quote"
-	Length   int       `json:"length"` // seconds or words; 0 for quotes
-	Punct    bool      `json:"punctuation,omitempty"`
-	Numbers  bool      `json:"numbers,omitempty"`
-	WPM      float64   `json:"wpm"`
-	Raw      float64   `json:"raw"`
-	Accuracy float64   `json:"accuracy"`
+	Date        time.Time `json:"date"`
+	Mode        string    `json:"mode"`   // "time", "words" or "quote"
+	Length      int       `json:"length"` // seconds or words; 0 for quotes
+	Punct       bool      `json:"punctuation,omitempty"`
+	Numbers     bool      `json:"numbers,omitempty"`
+	WPM         float64   `json:"wpm"`
+	Raw         float64   `json:"raw"`
+	Accuracy    float64   `json:"accuracy"`
+	Consistency float64   `json:"consistency"`
 }
 
 // sameKind reports whether two results come from comparable tests.

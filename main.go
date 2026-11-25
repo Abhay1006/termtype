@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -268,11 +269,12 @@ func (m model) takeSample() model {
 func (m model) finish(end time.Time) (model, tea.Cmd) {
 	m.end = end
 	m.result = result{
-		Date:     end,
-		Mode:     m.cfg.mode.String(),
-		WPM:      m.wpm(),
-		Raw:      m.rawWpm(),
-		Accuracy: m.accuracy(),
+		Date:        end,
+		Mode:        m.cfg.mode.String(),
+		WPM:         m.wpm(),
+		Raw:         m.rawWpm(),
+		Accuracy:    m.accuracy(),
+		Consistency: consistency(m.samples),
 	}
 	switch m.cfg.mode {
 	case modeTime:
@@ -455,6 +457,29 @@ func (m model) statusLine() string {
 	return statsStyle.Render(progress) + "   " + live
 }
 
+// consistency returns how steady the per-second WPM samples were, on a
+// 0-100 scale based on the coefficient of variation.
+func consistency(samples []float64) float64 {
+	if len(samples) < 2 {
+		return 0
+	}
+	var sum float64
+	for _, s := range samples {
+		sum += s
+	}
+	mean := sum / float64(len(samples))
+	if mean <= 0 {
+		return 0
+	}
+	var sqDiff float64
+	for _, s := range samples {
+		d := s - mean
+		sqDiff += d * d
+	}
+	stddev := math.Sqrt(sqDiff / float64(len(samples)))
+	return max(0, min(100, 100*(1-stddev/mean)))
+}
+
 // sparkline draws vals as a row of block characters, at most width wide.
 func sparkline(vals []float64, width int) string {
 	if len(vals) == 0 || width <= 0 {
@@ -496,7 +521,8 @@ func (m model) results() string {
 
 	lines := []string{
 		label("wpm ") + num(r.WPM) +
-			"    " + label("acc ") + statsStyle.Render(fmt.Sprintf("%.1f%%", r.Accuracy)),
+			"    " + label("acc ") + statsStyle.Render(fmt.Sprintf("%.1f%%", r.Accuracy)) +
+			"    " + label("consistency ") + statsStyle.Render(fmt.Sprintf("%.0f%%", r.Consistency)),
 		label("raw ") + num(r.Raw) +
 			"    " + label("chars ") + correctStyle.Render(strconv.Itoa(m.correctChars())) +
 			label("/") + errorStyle.Render(strconv.Itoa(wrong)) +

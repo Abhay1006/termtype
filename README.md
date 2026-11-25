@@ -18,7 +18,7 @@ with no runtime dependencies.
   - **quote**: type one of the bundled quotes from literature.
 - **Punctuation and numbers**: optional capitalised sentences with `. , ? ! ; :` and random numbers.
 - **Live feedback**: correct characters are coloured, mistakes are underlined, a wrongly typed space is highlighted, and live WPM plus time or word progress are shown while you type.
-- **Detailed results**: net WPM, raw WPM, accuracy, correct/incorrect characters, elapsed time, and a sparkline of your WPM for each second with its peak.
+- **Detailed results**: net WPM, raw WPM, accuracy, consistency, correct/incorrect characters, elapsed time, and a sparkline of your WPM for each second with its peak.
 - **Personal bests**: every result is saved. termtype shows your previous best and your average over the last 10 tests for the same settings, and tells you when you set a new best.
 - **Smooth text view**: words wrap to the terminal width (up to 60 columns) and a three-line window scrolls as you type, so the next line is always visible.
 - **Word deletion**: Ctrl+Backspace, Ctrl+W or Alt+Backspace delete a whole word.
@@ -88,6 +88,7 @@ A "word" is five characters, the usual convention for typing tests.
 - **WPM** (net) = correct characters ÷ 5 ÷ minutes elapsed
 - **Raw WPM** = all typed characters ÷ 5 ÷ minutes elapsed
 - **Accuracy** = correct characters ÷ typed characters × 100
+- **Consistency** = 100 × (1 − stddev(per-second WPM) ÷ mean(per-second WPM)), clamped to 0–100
 - **WPM graph** = characters typed during each second × 60 ÷ 5
 
 Personal bests and averages compare only tests with the same mode, length,
@@ -134,7 +135,8 @@ Every finished test is appended here, for example:
   "punctuation": true,
   "wpm": 82.4,
   "raw": 88.0,
-  "accuracy": 96.3
+  "accuracy": 96.3,
+  "consistency": 84.5
 }
 ```
 
