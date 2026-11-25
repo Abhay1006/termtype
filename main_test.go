@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestConsistency(t *testing.T) {
@@ -107,5 +109,107 @@ func TestResultConsistencyJSON(t *testing.T) {
 	}
 	if old.Consistency != 0 {
 		t.Fatalf("legacy Consistency = %v, want 0", old.Consistency)
+	}
+	if strings.Contains(string(data), "missed_keys") {
+		t.Fatalf("expected missed_keys to be omitted when empty, got %s", data)
+	}
+}
+
+func TestMissedTrackingAndBackspace(t *testing.T) {
+	start := time.Date(2026, 11, 25, 11, 0, 0, 0, time.UTC)
+	m := model{
+		cfg:    settings{mode: modeWords, words: 3},
+		target: "their quick brown",
+		start:  start,
+	}
+
+	// Mistype 'e' and 'i' in "their", backspace, then type everything right.
+	m = m.addChars("thxar")
+	m.input = ""
+	m = m.addChars("their quick brown")
+
+	if m.missedKeys['e'] != 1 || m.missedKeys['i'] != 1 {
+		t.Fatalf("missedKeys = %v, want e:1 and i:1", m.missedKeys)
+	}
+	if m.missedWords[0] != 2 {
+		t.Fatalf("missedWords = %v, want word 0 count 2", m.missedWords)
+	}
+
+	finished, _ := m.finish(start.Add(5 * time.Second))
+	if finished.result.MissedKeys["e"] != 1 || finished.result.MissedKeys["i"] != 1 {
+		t.Fatalf("result.MissedKeys = %v, want e:1 and i:1", finished.result.MissedKeys)
+	}
+
+	out := finished.results()
+	if !strings.Contains(out, "missed") || !strings.Contains(out, "e×1") || !strings.Contains(out, "their") {
+		t.Fatalf("results() = %q, want missed keys and word 'their'", out)
+	}
+
+	restarted := finished.restart(finished.cfg)
+	if len(restarted.missedKeys) != 0 || len(restarted.missedWords) != 0 {
+		t.Fatalf("restart should clear missed maps, got keys=%v words=%v", restarted.missedKeys, restarted.missedWords)
+	}
+}
+
+func TestMissedResultsHiddenAndWidthCap(t *testing.T) {
+	start := time.Date(2026, 11, 25, 11, 0, 0, 0, time.UTC)
+	clean := model{
+		cfg:    settings{mode: modeWords, words: 2},
+		target: "hello world",
+		start:  start,
+	}
+	clean = clean.addChars("hello world")
+	cleanFinished, _ := clean.finish(start.Add(3 * time.Second))
+	if cleanFinished.missedResults() != "" {
+		t.Fatalf("missedResults() = %q, want empty string when no mistakes", cleanFinished.missedResults())
+	}
+	if strings.Contains(cleanFinished.results(), "missed") {
+		t.Fatalf("results() should hide missed line when no mistakes: %q", cleanFinished.results())
+	}
+
+	// Many mistakes across words (including repeated word "their" and space).
+	noisy := model{
+		cfg:    settings{mode: modeWords, words: 6},
+		target: "their through alpha bravo charlie their",
+		start:  start,
+	}
+	// Make mistakes on: 'e' (x4), 'r' (x3), ','/space, and several words.
+	noisy = noisy.addChars("thxir throogh xlpha xrava xharlie thxir")
+	noisy.missedKeys['e'] = 4
+	noisy.missedKeys['r'] = 3
+	noisy.missedKeys[' '] = 2
+	noisy.missedKeys['a'] = 1
+	noisy.missedKeys['b'] = 1
+	noisy.missedKeys['c'] = 1
+
+	line := noisy.missedResults()
+	if line == "" {
+		t.Fatal("expected non-empty missedResults")
+	}
+	if w := lipgloss.Width(line); w > 60 {
+		t.Fatalf("missedResults width = %d, want <= 60 (%q)", w, line)
+	}
+	if !strings.Contains(line, "e×4") || !strings.Contains(line, "their") {
+		t.Fatalf("missedResults = %q, expected top key e×4 and word their", line)
+	}
+}
+
+func TestResultMissedKeysJSON(t *testing.T) {
+	r := result{
+		Date:       time.Date(2026, 11, 25, 11, 0, 0, 0, time.UTC),
+		Mode:       "words",
+		Length:     10,
+		MissedKeys: map[string]int{"e": 4, ",": 2},
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var decoded result
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if decoded.MissedKeys["e"] != 4 || decoded.MissedKeys[","] != 2 {
+		t.Fatalf("decoded.MissedKeys = %v, want e:4 ,:2", decoded.MissedKeys)
 	}
 }

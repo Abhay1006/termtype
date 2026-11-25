@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"math"
@@ -98,6 +99,9 @@ type model struct {
 	// samples holds the WPM typed during each second of the test.
 	samples   []float64
 	lastTyped int // typedChars at the previous sample
+
+	missedKeys  map[rune]int // target rune -> mistake count (persists across backspace)
+	missedWords map[int]int  // word index in target -> mistake count
 
 	history []result // all saved results, shared across restarts
 	result  result   // this test's result, once finished
@@ -249,10 +253,32 @@ func (m model) addChars(s string) model {
 		if len(in) >= len(target) {
 			break
 		}
+		pos := len(in)
+		if r != target[pos] {
+			m = m.recordMistake(target, pos)
+		}
 		in = append(in, r)
 	}
 	m.target = string(target)
 	m.input = string(in)
+	return m
+}
+
+func (m model) recordMistake(target []rune, pos int) model {
+	if m.missedKeys == nil {
+		m.missedKeys = make(map[rune]int)
+	}
+	if m.missedWords == nil {
+		m.missedWords = make(map[int]int)
+	}
+	m.missedKeys[target[pos]]++
+	wordIdx := 0
+	for _, tr := range target[:pos] {
+		if tr == ' ' {
+			wordIdx++
+		}
+	}
+	m.missedWords[wordIdx]++
 	return m
 }
 
@@ -268,6 +294,13 @@ func (m model) takeSample() model {
 // finish ends the test, records the result and saves the history.
 func (m model) finish(end time.Time) (model, tea.Cmd) {
 	m.end = end
+	var missed map[string]int
+	if len(m.missedKeys) > 0 {
+		missed = make(map[string]int, len(m.missedKeys))
+		for r, count := range m.missedKeys {
+			missed[string(r)] = count
+		}
+	}
 	m.result = result{
 		Date:        end,
 		Mode:        m.cfg.mode.String(),
@@ -275,6 +308,7 @@ func (m model) finish(end time.Time) (model, tea.Cmd) {
 		Raw:         m.rawWpm(),
 		Accuracy:    m.accuracy(),
 		Consistency: consistency(m.samples),
+		MissedKeys:  missed,
 	}
 	switch m.cfg.mode {
 	case modeTime:
@@ -548,7 +582,93 @@ func (m model) results() string {
 		lines = append(lines, statsStyle.Render(sparkline(m.samples, m.wrapWidth()-12))+
 			label(fmt.Sprintf("  peak %.0f", slices.Max(m.samples))))
 	}
+	if missedLine := m.missedResults(); missedLine != "" {
+		lines = append(lines, missedLine)
+	}
 	return strings.Join(lines, "\n")
+}
+
+type countItem struct {
+	name  string
+	count int
+}
+
+func sortCountItems(counts map[string]int) []countItem {
+	items := make([]countItem, 0, len(counts))
+	for name, count := range counts {
+		items = append(items, countItem{name: name, count: count})
+	}
+	slices.SortFunc(items, func(a, b countItem) int {
+		if c := cmp.Compare(b.count, a.count); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.name, b.name)
+	})
+	return items
+}
+
+func formatMissedRune(r rune) string {
+	if r == ' ' {
+		return "␣"
+	}
+	return string(r)
+}
+
+func (m model) missedResults() string {
+	if len(m.missedKeys) == 0 {
+		return ""
+	}
+	label := func(s string) string { return pendingStyle.Render(s) }
+
+	keyCounts := make(map[string]int, len(m.missedKeys))
+	for r, c := range m.missedKeys {
+		keyCounts[formatMissedRune(r)] += c
+	}
+	keys := sortCountItems(keyCounts)
+
+	targetWords := strings.Fields(m.target)
+	wordCounts := make(map[string]int)
+	for idx, c := range m.missedWords {
+		if idx >= 0 && idx < len(targetWords) {
+			wordCounts[targetWords[idx]] += c
+		}
+	}
+	words := sortCountItems(wordCounts)
+
+	maxWidth := m.wrapWidth()
+	var keyParts []string
+	plainLen := len("missed")
+	for _, k := range keys {
+		if len(keyParts) >= 4 {
+			break
+		}
+		token := fmt.Sprintf("%s×%d", k.name, k.count)
+		if len(keyParts) > 0 && plainLen+2+len([]rune(token)) > maxWidth/2 {
+			break
+		}
+		plainLen += 2 + len([]rune(token))
+		keyParts = append(keyParts, errorStyle.Render(k.name)+label("×"+strconv.Itoa(k.count)))
+	}
+
+	out := label("missed  ") + strings.Join(keyParts, "  ")
+	if len(words) == 0 {
+		return out
+	}
+
+	var wordParts []string
+	plainLen += len("    words")
+	for _, w := range words {
+		if len(wordParts) >= 3 {
+			break
+		}
+		wLen := len([]rune(w.name))
+		if len(wordParts) > 0 && plainLen+2+wLen > maxWidth {
+			break
+		}
+		plainLen += 2 + wLen
+		wordParts = append(wordParts, errorStyle.Render(w.name))
+	}
+	return out + "    " + label("words  ") + strings.Join(wordParts, "  ")
 }
 
 func (m model) View() string {

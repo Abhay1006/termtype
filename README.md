@@ -18,7 +18,7 @@ with no runtime dependencies.
   - **quote**: type one of the bundled quotes from literature.
 - **Punctuation and numbers**: optional capitalised sentences with `. , ? ! ; :` and random numbers.
 - **Live feedback**: correct characters are coloured, mistakes are underlined, a wrongly typed space is highlighted, and live WPM plus time or word progress are shown while you type.
-- **Detailed results**: net WPM, raw WPM, accuracy, consistency, correct/incorrect characters, elapsed time, and a sparkline of your WPM for each second with its peak.
+- **Detailed results**: net WPM, raw WPM, accuracy, consistency, correct/incorrect characters, elapsed time, a sparkline of your WPM for each second with its peak, and your most missed keys and words.
 - **Personal bests**: every result is saved. termtype shows your previous best and your average over the last 10 tests for the same settings, and tells you when you set a new best.
 - **Smooth text view**: words wrap to the terminal width (up to 60 columns) and a three-line window scrolls as you type, so the next line is always visible.
 - **Word deletion**: Ctrl+Backspace, Ctrl+W or Alt+Backspace delete a whole word.
