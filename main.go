@@ -308,6 +308,7 @@ func (m model) finish(end time.Time) (model, tea.Cmd) {
 		Raw:         m.rawWpm(),
 		Accuracy:    m.accuracy(),
 		Consistency: consistency(m.samples),
+		Duration:    m.elapsed().Seconds(),
 		MissedKeys:  missed,
 	}
 	switch m.cfg.mode {
@@ -450,24 +451,32 @@ func (m model) modeBar() string {
 	return strings.Join(parts, "  ")
 }
 
-// modeLabel describes the finished test, e.g. "time 30 · punctuation".
-func (m model) modeLabel() string {
-	label := m.cfg.mode.String()
-	switch m.cfg.mode {
-	case modeTime:
-		label += " " + strconv.Itoa(m.cfg.seconds)
-	case modeWords:
-		label += " " + strconv.Itoa(m.cfg.words)
+func formatModeLabel(mode string, length int, punct, nums bool) string {
+	label := mode
+	if mode != "quote" && length > 0 {
+		label += " " + strconv.Itoa(length)
 	}
-	if m.cfg.mode != modeQuote {
-		if m.cfg.punct {
+	if mode != "quote" {
+		if punct {
 			label += " · punctuation"
 		}
-		if m.cfg.nums {
+		if nums {
 			label += " · numbers"
 		}
 	}
-	return pendingStyle.Render(label)
+	return label
+}
+
+// modeLabel describes the finished test, e.g. "time 30 · punctuation".
+func (m model) modeLabel() string {
+	length := 0
+	switch m.cfg.mode {
+	case modeTime:
+		length = m.cfg.seconds
+	case modeWords:
+		length = m.cfg.words
+	}
+	return pendingStyle.Render(formatModeLabel(m.cfg.mode.String(), length, m.cfg.punct, m.cfg.nums))
 }
 
 // statusLine is shown above the text.
@@ -768,14 +777,53 @@ func fail(format string, args ...any) {
 	os.Exit(2)
 }
 
+func initTheme(themeFlag string) {
+	conf, err := loadConfig()
+	if err != nil {
+		fail("reading config: %v", err)
+	}
+	name := conf.Theme
+	if themeFlag != "" {
+		name = themeFlag
+	}
+	t, err := resolveTheme(name, conf.Colors)
+	if err != nil {
+		fail("%v", err)
+	}
+	applyTheme(t)
+}
+
+func runStats(themeFlag string) {
+	initTheme(themeFlag)
+	history, err := loadHistory()
+	if err != nil {
+		fail("reading history: %v", err)
+	}
+	fmt.Println(formatStats(history))
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "stats" {
+		fs := flag.NewFlagSet("stats", flag.ExitOnError)
+		themeName := fs.String("theme", "", "colour theme: "+themeNames())
+		_ = fs.Parse(os.Args[2:])
+		runStats(*themeName)
+		return
+	}
+
 	seconds := flag.Int("t", 30, "test length in seconds (time mode)")
 	words := flag.Int("w", 0, "number of words; switches to words mode")
 	quote := flag.Bool("q", false, "type a quote instead of random words")
 	punct := flag.Bool("p", false, "add punctuation and capital letters")
 	nums := flag.Bool("n", false, "add numbers")
 	themeName := flag.String("theme", "", "colour theme: "+themeNames())
+	showStats := flag.Bool("stats", false, "show stats from history and exit")
 	flag.Parse()
+
+	if *showStats {
+		runStats(*themeName)
+		return
+	}
 
 	if *seconds <= 0 || *words < 0 {
 		fail("-t must be > 0 and -w must be >= 0")
@@ -784,19 +832,7 @@ func main() {
 		fail("-q and -w can't be used together")
 	}
 
-	conf, err := loadConfig()
-	if err != nil {
-		fail("reading config: %v", err)
-	}
-	name := conf.Theme
-	if *themeName != "" {
-		name = *themeName
-	}
-	t, err := resolveTheme(name, conf.Colors)
-	if err != nil {
-		fail("%v", err)
-	}
-	applyTheme(t)
+	initTheme(*themeName)
 
 	history, err := loadHistory()
 	if err != nil {

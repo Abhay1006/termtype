@@ -51,6 +51,7 @@ termtype -w 50        # 50 word test
 termtype -q           # quote test
 termtype -p -n        # add punctuation and numbers
 termtype -theme ocean # use a different colour theme
+termtype stats        # show test history and personal bests
 ```
 
 ### Flags
@@ -63,6 +64,7 @@ termtype -theme ocean # use a different colour theme
 | `-p`          | Add punctuation and capital letters                 | off       |
 | `-n`          | Add numbers                                         | off       |
 | `-theme <name>` | Colour theme: `default`, `forest`, `mono`, `ocean`, `warm` | `default` |
+| `-stats`      | Show stats from history and exit (same as `termtype stats`) | off |
 
 `-q` and `-w` can't be used together.
 
@@ -149,6 +151,7 @@ Delete this file to reset your personal bests.
 ├── main.go      # Bubble Tea model: input handling, test logic, rendering, flags
 ├── text.go      # Random word, punctuation, number and quote generation
 ├── history.go   # Saving/loading results, personal best and average summary
+├── stats.go     # Formatting the `termtype stats` history summary
 ├── theme.go     # Built-in themes, config.json loading, Lip Gloss styles
 ├── words.txt    # 642 common English words (embedded in the binary)
 └── quotes.txt   # Quotes for quote mode (embedded in the binary)
