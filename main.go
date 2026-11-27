@@ -1,17 +1,22 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+var version = "dev"
 
 // visibleLines is how many lines of the text are shown at once.
 const visibleLines = 3
@@ -23,10 +28,22 @@ const (
 	modeWords
 	modeQuote
 	modeCount // number of modes, used for cycling
+	modeCustom
 )
 
 func (t testMode) String() string {
-	return [...]string{"time", "words", "quote"}[t]
+	switch t {
+	case modeTime:
+		return "time"
+	case modeWords:
+		return "words"
+	case modeQuote:
+		return "quote"
+	case modeCustom:
+		return "custom"
+	default:
+		return ""
+	}
 }
 
 var (
@@ -36,11 +53,16 @@ var (
 
 // settings is the test configuration. It survives restarts.
 type settings struct {
-	mode    testMode
-	seconds int
-	words   int
-	punct   bool
-	nums    bool
+	mode       testMode
+	seconds    int
+	words      int
+	punct      bool
+	nums       bool
+	customText string
+}
+
+func defaultSettings() settings {
+	return settings{mode: modeTime, seconds: 30, words: 25}
 }
 
 func (s settings) duration() time.Duration {
@@ -49,10 +71,14 @@ func (s settings) duration() time.Duration {
 
 // text returns the text for a new test, or n more words in time mode.
 func (s settings) text(n int) string {
-	if s.mode == modeQuote {
+	switch s.mode {
+	case modeQuote:
 		return randomQuote()
+	case modeCustom:
+		return s.customText
+	default:
+		return generateText(n, s.punct, s.nums)
 	}
-	return generateText(n, s.punct, s.nums)
 }
 
 // cycle returns the option after (dir=1) or before (dir=-1) cur.
@@ -84,6 +110,24 @@ func saveCmd(history []result) tea.Cmd {
 	}
 }
 
+var settingsSaveSeq atomic.Int64
+
+// savedSettingsMsg reports the outcome of writing config.json.
+type savedSettingsMsg struct{ err error }
+
+func saveSettingsCmd(s settings) tea.Cmd {
+	if s.mode == modeCustom {
+		return nil
+	}
+	seq := settingsSaveSeq.Add(1)
+	return func() tea.Msg {
+		if seq < settingsSaveSeq.Load() {
+			return savedSettingsMsg{}
+		}
+		return savedSettingsMsg{err: saveSettings(s)}
+	}
+}
+
 type model struct {
 	cfg    settings
 	target string
@@ -98,10 +142,14 @@ type model struct {
 	samples   []float64
 	lastTyped int // typedChars at the previous sample
 
-	history []result // all saved results, shared across restarts
-	result  result   // this test's result, once finished
-	summary summary  // result compared with history, once finished
-	saveErr error
+	missedKeys  map[rune]int // target rune -> mistake count (persists across backspace)
+	missedWords map[int]int  // word index in target -> mistake count
+
+	history     []result // all saved results, shared across restarts
+	result      result   // this test's result, once finished
+	summary     summary  // result compared with history, once finished
+	saveErr     error
+	settingsErr error
 }
 
 func (m model) Init() tea.Cmd {
@@ -116,6 +164,7 @@ func (m model) restart(cfg settings) model {
 	nm.height = m.height
 	nm.id = m.id + 1
 	nm.saveErr = m.saveErr
+	nm.settingsErr = m.settingsErr
 	return nm
 }
 
@@ -127,6 +176,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case savedMsg:
 		m.saveErr = msg.err
+		return m, nil
+	case savedSettingsMsg:
+		m.settingsErr = msg.err
 		return m, nil
 	case tickMsg:
 		if msg.id != m.id || m.finished() {
@@ -152,7 +204,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Settings can only be changed before the test starts.
 		if wasIdle {
 			if cfg, ok := m.changeSettings(msg); ok {
-				return m.restart(cfg), nil
+				var cmd tea.Cmd
+				if cfg != m.cfg {
+					cmd = saveSettingsCmd(cfg)
+				}
+				return m.restart(cfg), cmd
 			}
 		}
 
@@ -190,6 +246,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // changeSettings handles the keys that change the test before it starts.
 // It reports false if msg is not one of them.
 func (m model) changeSettings(msg tea.KeyMsg) (settings, bool) {
+	if m.cfg.mode == modeCustom {
+		return m.cfg, false
+	}
 	cfg := m.cfg
 	switch msg.Type {
 	case tea.KeyDown:
@@ -248,10 +307,32 @@ func (m model) addChars(s string) model {
 		if len(in) >= len(target) {
 			break
 		}
+		pos := len(in)
+		if r != target[pos] {
+			m = m.recordMistake(target, pos)
+		}
 		in = append(in, r)
 	}
 	m.target = string(target)
 	m.input = string(in)
+	return m
+}
+
+func (m model) recordMistake(target []rune, pos int) model {
+	if m.missedKeys == nil {
+		m.missedKeys = make(map[rune]int)
+	}
+	if m.missedWords == nil {
+		m.missedWords = make(map[int]int)
+	}
+	m.missedKeys[target[pos]]++
+	wordIdx := 0
+	for _, tr := range target[:pos] {
+		if tr == ' ' {
+			wordIdx++
+		}
+	}
+	m.missedWords[wordIdx]++
 	return m
 }
 
@@ -267,12 +348,22 @@ func (m model) takeSample() model {
 // finish ends the test, records the result and saves the history.
 func (m model) finish(end time.Time) (model, tea.Cmd) {
 	m.end = end
+	var missed map[string]int
+	if len(m.missedKeys) > 0 {
+		missed = make(map[string]int, len(m.missedKeys))
+		for r, count := range m.missedKeys {
+			missed[string(r)] = count
+		}
+	}
 	m.result = result{
-		Date:     end,
-		Mode:     m.cfg.mode.String(),
-		WPM:      m.wpm(),
-		Raw:      m.rawWpm(),
-		Accuracy: m.accuracy(),
+		Date:        end,
+		Mode:        m.cfg.mode.String(),
+		WPM:         m.wpm(),
+		Raw:         m.rawWpm(),
+		Accuracy:    m.accuracy(),
+		Consistency: consistency(m.samples),
+		Duration:    m.elapsed().Seconds(),
+		MissedKeys:  missed,
 	}
 	switch m.cfg.mode {
 	case modeTime:
@@ -280,15 +371,17 @@ func (m model) finish(end time.Time) (model, tea.Cmd) {
 	case modeWords:
 		m.result.Length = m.cfg.words
 	}
-	if m.cfg.mode != modeQuote {
+	if m.cfg.mode != modeQuote && m.cfg.mode != modeCustom {
 		m.result.Punct = m.cfg.punct
 		m.result.Numbers = m.cfg.nums
 	}
-	m.summary = summarize(m.history, m.result)
+	if m.cfg.mode != modeCustom {
+		m.summary = summarize(m.history, m.result)
+	}
 	// Clip so the append copies instead of writing into a slice that an
 	// older model (or the save in progress) might still be using.
 	m.history = append(slices.Clip(m.history), m.result)
-	return m, saveCmd(m.history)
+	return m, tea.Batch(saveCmd(m.history), saveSettingsCmd(m.cfg))
 }
 
 func (m model) finished() bool {
@@ -389,6 +482,9 @@ func pick(s string, on bool) string {
 
 // modeBar shows the test settings before the test starts.
 func (m model) modeBar() string {
+	if m.cfg.mode == modeCustom {
+		return statsStyle.Render("custom") + "  " + pendingStyle.Render(fmt.Sprintf("%d words", m.totalWords()))
+	}
 	sep := pendingStyle.Render("│")
 	var parts []string
 	for mode := range modeCount {
@@ -414,24 +510,32 @@ func (m model) modeBar() string {
 	return strings.Join(parts, "  ")
 }
 
-// modeLabel describes the finished test, e.g. "time 30 · punctuation".
-func (m model) modeLabel() string {
-	label := m.cfg.mode.String()
-	switch m.cfg.mode {
-	case modeTime:
-		label += " " + strconv.Itoa(m.cfg.seconds)
-	case modeWords:
-		label += " " + strconv.Itoa(m.cfg.words)
+func formatModeLabel(mode string, length int, punct, nums bool) string {
+	label := mode
+	if mode != "quote" && mode != "custom" && length > 0 {
+		label += " " + strconv.Itoa(length)
 	}
-	if m.cfg.mode != modeQuote {
-		if m.cfg.punct {
+	if mode != "quote" && mode != "custom" {
+		if punct {
 			label += " · punctuation"
 		}
-		if m.cfg.nums {
+		if nums {
 			label += " · numbers"
 		}
 	}
-	return pendingStyle.Render(label)
+	return label
+}
+
+// modeLabel describes the finished test, e.g. "time 30 · punctuation".
+func (m model) modeLabel() string {
+	length := 0
+	switch m.cfg.mode {
+	case modeTime:
+		length = m.cfg.seconds
+	case modeWords:
+		length = m.cfg.words
+	}
+	return pendingStyle.Render(formatModeLabel(m.cfg.mode.String(), length, m.cfg.punct, m.cfg.nums))
 }
 
 // statusLine is shown above the text.
@@ -453,6 +557,29 @@ func (m model) statusLine() string {
 	}
 	live := pendingStyle.Render(liveWpm + " wpm")
 	return statsStyle.Render(progress) + "   " + live
+}
+
+// consistency returns how steady the per-second WPM samples were, on a
+// 0-100 scale based on the coefficient of variation.
+func consistency(samples []float64) float64 {
+	if len(samples) < 2 {
+		return 0
+	}
+	var sum float64
+	for _, s := range samples {
+		sum += s
+	}
+	mean := sum / float64(len(samples))
+	if mean <= 0 {
+		return 0
+	}
+	var sqDiff float64
+	for _, s := range samples {
+		d := s - mean
+		sqDiff += d * d
+	}
+	stddev := math.Sqrt(sqDiff / float64(len(samples)))
+	return max(0, min(100, 100*(1-stddev/mean)))
 }
 
 // sparkline draws vals as a row of block characters, at most width wide.
@@ -496,33 +623,122 @@ func (m model) results() string {
 
 	lines := []string{
 		label("wpm ") + num(r.WPM) +
-			"    " + label("acc ") + statsStyle.Render(fmt.Sprintf("%.1f%%", r.Accuracy)),
+			"    " + label("acc ") + statsStyle.Render(fmt.Sprintf("%.1f%%", r.Accuracy)) +
+			"    " + label("consistency ") + statsStyle.Render(fmt.Sprintf("%.0f%%", r.Consistency)),
 		label("raw ") + num(r.Raw) +
 			"    " + label("chars ") + correctStyle.Render(strconv.Itoa(m.correctChars())) +
 			label("/") + errorStyle.Render(strconv.Itoa(wrong)) +
 			"    " + label("time ") + statsStyle.Render(fmt.Sprintf("%.1fs", m.elapsed().Seconds())),
 	}
 
-	s := m.summary
-	switch {
-	case s.newBest(r):
-		lines = append(lines, correctStyle.Bold(true).Render("new best!")+
-			label(fmt.Sprintf("  (previous %.0f)", s.prevBest)))
-	case !s.hasPrev:
-		lines = append(lines, label("first result for this mode"))
-	default:
-		lines = append(lines, label("best ")+num(s.prevBest)+
-			"    "+label(fmt.Sprintf("avg of last %d ", s.avgCount))+num(s.avg))
-	}
-	if s.newBest(r) && s.avgCount > 1 {
-		lines[len(lines)-1] += "    " + label(fmt.Sprintf("avg of last %d ", s.avgCount)) + num(s.avg)
+	if m.cfg.mode != modeCustom {
+		s := m.summary
+		switch {
+		case s.newBest(r):
+			lines = append(lines, correctStyle.Bold(true).Render("new best!")+
+				label(fmt.Sprintf("  (previous %.0f)", s.prevBest)))
+		case !s.hasPrev:
+			lines = append(lines, label("first result for this mode"))
+		default:
+			lines = append(lines, label("best ")+num(s.prevBest)+
+				"    "+label(fmt.Sprintf("avg of last %d ", s.avgCount))+num(s.avg))
+		}
+		if s.newBest(r) && s.avgCount > 1 {
+			lines[len(lines)-1] += "    " + label(fmt.Sprintf("avg of last %d ", s.avgCount)) + num(s.avg)
+		}
 	}
 
 	if len(m.samples) >= 2 {
 		lines = append(lines, statsStyle.Render(sparkline(m.samples, m.wrapWidth()-12))+
 			label(fmt.Sprintf("  peak %.0f", slices.Max(m.samples))))
 	}
+	if missedLine := m.missedResults(); missedLine != "" {
+		lines = append(lines, missedLine)
+	}
 	return strings.Join(lines, "\n")
+}
+
+type countItem struct {
+	name  string
+	count int
+}
+
+func sortCountItems(counts map[string]int) []countItem {
+	items := make([]countItem, 0, len(counts))
+	for name, count := range counts {
+		items = append(items, countItem{name: name, count: count})
+	}
+	slices.SortFunc(items, func(a, b countItem) int {
+		if c := cmp.Compare(b.count, a.count); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.name, b.name)
+	})
+	return items
+}
+
+func formatMissedRune(r rune) string {
+	if r == ' ' {
+		return "␣"
+	}
+	return string(r)
+}
+
+func (m model) missedResults() string {
+	if len(m.missedKeys) == 0 {
+		return ""
+	}
+	label := func(s string) string { return pendingStyle.Render(s) }
+
+	keyCounts := make(map[string]int, len(m.missedKeys))
+	for r, c := range m.missedKeys {
+		keyCounts[formatMissedRune(r)] += c
+	}
+	keys := sortCountItems(keyCounts)
+
+	targetWords := strings.Fields(m.target)
+	wordCounts := make(map[string]int)
+	for idx, c := range m.missedWords {
+		if idx >= 0 && idx < len(targetWords) {
+			wordCounts[targetWords[idx]] += c
+		}
+	}
+	words := sortCountItems(wordCounts)
+
+	maxWidth := m.wrapWidth()
+	var keyParts []string
+	plainLen := len("missed")
+	for _, k := range keys {
+		if len(keyParts) >= 4 {
+			break
+		}
+		token := fmt.Sprintf("%s×%d", k.name, k.count)
+		if len(keyParts) > 0 && plainLen+2+len([]rune(token)) > maxWidth/2 {
+			break
+		}
+		plainLen += 2 + len([]rune(token))
+		keyParts = append(keyParts, errorStyle.Render(k.name)+label("×"+strconv.Itoa(k.count)))
+	}
+
+	out := label("missed  ") + strings.Join(keyParts, "  ")
+	if len(words) == 0 {
+		return out
+	}
+
+	var wordParts []string
+	plainLen += len("    words")
+	for _, w := range words {
+		if len(wordParts) >= 3 {
+			break
+		}
+		wLen := len([]rune(w.name))
+		if len(wordParts) > 0 && plainLen+2+wLen > maxWidth {
+			break
+		}
+		plainLen += 2 + wLen
+		wordParts = append(wordParts, errorStyle.Render(w.name))
+	}
+	return out + "    " + label("words  ") + strings.Join(wordParts, "  ")
 }
 
 func (m model) View() string {
@@ -595,13 +811,20 @@ func (m model) View() string {
 		out.WriteString(errorStyle.Render("could not save history: " + m.saveErr.Error()))
 		out.WriteString("\n\n")
 	}
-	if m.start.IsZero() && m.cfg.mode == modeQuote {
+	if m.settingsErr != nil {
+		out.WriteString(errorStyle.Render("could not save settings: " + m.settingsErr.Error()))
+		out.WriteString("\n\n")
+	}
+	switch {
+	case m.start.IsZero() && m.cfg.mode == modeCustom:
+		out.WriteString(pendingStyle.Render("tab restart • esc quit"))
+	case m.start.IsZero() && m.cfg.mode == modeQuote:
 		out.WriteString(pendingStyle.Render("←/→ new quote • ↑/↓ mode • tab restart • esc quit"))
-	} else if m.start.IsZero() {
+	case m.start.IsZero():
 		out.WriteString(pendingStyle.Render("←/→ length • ↑/↓ mode • ctrl+p punctuation • ctrl+n numbers"))
 		out.WriteString("\n")
 		out.WriteString(pendingStyle.Render("tab restart • esc quit"))
-	} else {
+	default:
 		out.WriteString(pendingStyle.Render("tab to restart • esc to quit"))
 	}
 
@@ -622,35 +845,132 @@ func fail(format string, args ...any) {
 	os.Exit(2)
 }
 
-func main() {
-	seconds := flag.Int("t", 30, "test length in seconds (time mode)")
-	words := flag.Int("w", 0, "number of words; switches to words mode")
-	quote := flag.Bool("q", false, "type a quote instead of random words")
-	punct := flag.Bool("p", false, "add punctuation and capital letters")
-	nums := flag.Bool("n", false, "add numbers")
-	themeName := flag.String("theme", "", "colour theme: "+themeNames())
-	flag.Parse()
-
-	if *seconds <= 0 || *words < 0 {
-		fail("-t must be > 0 and -w must be >= 0")
-	}
-	if *quote && *words > 0 {
-		fail("-q and -w can't be used together")
-	}
-
+func initTheme(themeFlag string) config {
 	conf, err := loadConfig()
 	if err != nil {
 		fail("reading config: %v", err)
 	}
 	name := conf.Theme
-	if *themeName != "" {
-		name = *themeName
+	if themeFlag != "" {
+		name = themeFlag
 	}
 	t, err := resolveTheme(name, conf.Colors)
 	if err != nil {
 		fail("%v", err)
 	}
 	applyTheme(t)
+	return conf
+}
+
+func resolveSettings(base settings, setFlags map[string]bool, seconds, words int, quote, punct, nums bool) settings {
+	cfg := base
+	if setFlags["p"] {
+		cfg.punct = punct
+	}
+	if setFlags["n"] {
+		cfg.nums = nums
+	}
+	if setFlags["t"] {
+		cfg.seconds = seconds
+	}
+	switch {
+	case setFlags["q"] && quote:
+		cfg.mode = modeQuote
+	case setFlags["w"] && words > 0:
+		cfg.mode = modeWords
+		cfg.words = words
+	case setFlags["t"]:
+		cfg.mode = modeTime
+	}
+	return cfg
+}
+
+func runStats(themeFlag string) {
+	initTheme(themeFlag)
+	history, err := loadHistory()
+	if err != nil {
+		fail("reading history: %v", err)
+	}
+	fmt.Println(formatStats(history))
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "stats" {
+		fs := flag.NewFlagSet("stats", flag.ExitOnError)
+		themeName := fs.String("theme", "", "colour theme: "+themeNames())
+		_ = fs.Parse(os.Args[2:])
+		runStats(*themeName)
+		return
+	}
+
+	seconds := flag.Int("t", 30, "test length in seconds (time mode)")
+	wordsFlag := flag.Int("w", 0, "number of words; switches to words mode")
+	quote := flag.Bool("q", false, "type a quote instead of random words")
+	punct := flag.Bool("p", false, "add punctuation and capital letters")
+	nums := flag.Bool("n", false, "add numbers")
+	filePath := flag.String("file", "", "type text from a file (use - for stdin)")
+	wordsFilePath := flag.String("words-file", "", "word list file for time and words modes")
+	themeName := flag.String("theme", "", "colour theme: "+themeNames())
+	showStats := flag.Bool("stats", false, "show stats from history and exit")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("termtype " + version)
+		return
+	}
+	if *showStats {
+		runStats(*themeName)
+		return
+	}
+
+	setFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		setFlags[f.Name] = true
+	})
+
+	if *seconds <= 0 || *wordsFlag < 0 {
+		fail("-t must be > 0 and -w must be >= 0")
+	}
+	if *quote && *wordsFlag > 0 {
+		fail("-q and -w can't be used together")
+	}
+	if *filePath != "" && *wordsFilePath != "" {
+		fail("-file and -words-file can't be used together")
+	}
+	if *filePath != "" && (*quote || *wordsFlag > 0 || setFlags["t"]) {
+		fail("-file can't be used with -t, -w or -q")
+	}
+
+	conf := initTheme(*themeName)
+
+	if *wordsFilePath != "" {
+		loadedWords, err := loadWordsFile(*wordsFilePath)
+		if err != nil {
+			fail("reading words file: %v", err)
+		}
+		words = loadedWords
+	}
+
+	var cfg settings
+	programOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	if *filePath != "" {
+		customText, err := readCustomText(*filePath, os.Stdin)
+		if err != nil {
+			fail("reading text: %v", err)
+		}
+		if *filePath == "-" {
+			tty, err := os.Open("/dev/tty")
+			if err != nil {
+				fail("opening /dev/tty: %v", err)
+			}
+			defer tty.Close()
+			programOpts = append(programOpts, tea.WithInput(tty))
+		}
+		cfg = settings{mode: modeCustom, customText: customText}
+	} else {
+		cfg = resolveSettings(conf.toSettings(), setFlags, *seconds, *wordsFlag, *quote, *punct, *nums)
+	}
 
 	history, err := loadHistory()
 	if err != nil {
@@ -658,16 +978,7 @@ func main() {
 		fail("reading history: %v", err)
 	}
 
-	cfg := settings{mode: modeTime, seconds: *seconds, words: 25, punct: *punct, nums: *nums}
-	switch {
-	case *quote:
-		cfg.mode = modeQuote
-	case *words > 0:
-		cfg.mode = modeWords
-		cfg.words = *words
-	}
-
-	p := tea.NewProgram(newModel(cfg, history), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(cfg, history), programOpts...)
 	if _, err := p.Run(); err != nil {
 		fmt.Println("error:", err)
 		os.Exit(1)

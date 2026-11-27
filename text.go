@@ -2,9 +2,13 @@ package main
 
 import (
 	_ "embed"
+	"fmt"
+	"io"
 	"math/rand/v2"
+	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 //go:embed words.txt
@@ -35,6 +39,44 @@ func randomQuote() string {
 	return quotes[rand.IntN(len(quotes))]
 }
 
+func loadWordsFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	loaded := strings.Fields(string(data))
+	if len(loaded) == 0 {
+		return nil, fmt.Errorf("%s: no words found", path)
+	}
+	return loaded, nil
+}
+
+func readCustomText(path string, stdin io.Reader) (string, error) {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", err
+	}
+	text := strings.Join(splitLines(string(data)), " ")
+	if text == "" {
+		return "", fmt.Errorf("no text to type")
+	}
+	return text, nil
+}
+
+func capitalizeFirst(w string) string {
+	if w == "" {
+		return ""
+	}
+	_, size := utf8.DecodeRuneInString(w)
+	return strings.ToUpper(w[:size]) + w[size:]
+}
+
 // generateText returns n random words. With punct, words are grouped into
 // capitalised sentences with commas and other marks, always ending in a
 // full stop. With nums, roughly one word in ten becomes a number.
@@ -48,7 +90,7 @@ func generateText(n int, punct, nums bool) string {
 		}
 		if punct {
 			if newSentence {
-				w = strings.ToUpper(w[:1]) + w[1:]
+				w = capitalizeFirst(w)
 			}
 			newSentence = false
 			if i == n-1 {

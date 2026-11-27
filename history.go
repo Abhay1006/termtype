@@ -12,14 +12,32 @@ import (
 
 // result is one finished test, as stored in history.json.
 type result struct {
-	Date     time.Time `json:"date"`
-	Mode     string    `json:"mode"`   // "time", "words" or "quote"
-	Length   int       `json:"length"` // seconds or words; 0 for quotes
-	Punct    bool      `json:"punctuation,omitempty"`
-	Numbers  bool      `json:"numbers,omitempty"`
-	WPM      float64   `json:"wpm"`
-	Raw      float64   `json:"raw"`
-	Accuracy float64   `json:"accuracy"`
+	Date        time.Time      `json:"date"`
+	Mode        string         `json:"mode"`   // "time", "words" or "quote"
+	Length      int            `json:"length"` // seconds or words; 0 for quotes
+	Punct       bool           `json:"punctuation,omitempty"`
+	Numbers     bool           `json:"numbers,omitempty"`
+	WPM         float64        `json:"wpm"`
+	Raw         float64        `json:"raw"`
+	Accuracy    float64        `json:"accuracy"`
+	Consistency float64        `json:"consistency"`
+	Duration    float64        `json:"duration,omitempty"` // elapsed seconds
+	MissedKeys  map[string]int `json:"missed_keys,omitempty"`
+}
+
+// resultDuration returns the test's elapsed duration, falling back to an
+// estimate from mode and length for older history entries without Duration.
+func resultDuration(r result) time.Duration {
+	if r.Duration > 0 {
+		return time.Duration(r.Duration * float64(time.Second))
+	}
+	if r.Mode == "time" && r.Length > 0 {
+		return time.Duration(r.Length) * time.Second
+	}
+	if r.Mode == "words" && r.Length > 0 && r.Raw > 0 {
+		return time.Duration(float64(r.Length) / r.Raw * 60 * float64(time.Second))
+	}
+	return 0
 }
 
 // sameKind reports whether two results come from comparable tests.
@@ -105,17 +123,13 @@ func loadHistory() ([]result, error) {
 	return history, nil
 }
 
-// saveHistory writes all results. It writes to a temporary file first and
-// then renames it, so a crash mid-write can't corrupt the history.
-func saveHistory(history []result) error {
-	path, err := historyPath()
-	if err != nil {
-		return err
-	}
+// writeJSON marshals v as indented JSON and writes it atomically via a
+// temporary file in the same directory.
+func writeJSON(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(history, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -124,4 +138,14 @@ func saveHistory(history []result) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// saveHistory writes all results. It writes to a temporary file first and
+// then renames it, so a crash mid-write can't corrupt the history.
+func saveHistory(history []result) error {
+	path, err := historyPath()
+	if err != nil {
+		return err
+	}
+	return writeJSON(path, history)
 }
