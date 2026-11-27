@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -211,5 +213,197 @@ func TestResultMissedKeysJSON(t *testing.T) {
 	}
 	if decoded.MissedKeys["e"] != 4 || decoded.MissedKeys[","] != 2 {
 		t.Fatalf("decoded.MissedKeys = %v, want e:4 ,:2", decoded.MissedKeys)
+	}
+}
+
+func TestDeleteWord(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"   ", ""},
+		{"hello", ""},
+		{"hello ", ""},
+		{"hello world", "hello "},
+		{"hello world   ", "hello "},
+		{"one two three", "one two "},
+	}
+	for _, tc := range tests {
+		if got := deleteWord(tc.in); got != tc.want {
+			t.Errorf("deleteWord(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestCycle(t *testing.T) {
+	opts := []int{15, 30, 60}
+	tests := []struct {
+		cur, dir, want int
+	}{
+		{15, 1, 30},
+		{60, 1, 15},
+		{15, -1, 60},
+		{30, -1, 15},
+		{45, 1, 15},  // not in list, forward -> first
+		{45, -1, 60}, // not in list, backward -> last
+	}
+	for _, tc := range tests {
+		if got := cycle(opts, tc.cur, tc.dir); got != tc.want {
+			t.Errorf("cycle(%v, %d, %d) = %d, want %d", opts, tc.cur, tc.dir, got, tc.want)
+		}
+	}
+}
+
+func TestSparkline(t *testing.T) {
+	if got := sparkline(nil, 10); got != "" {
+		t.Fatalf("sparkline(nil, 10) = %q, want empty", got)
+	}
+	if got := sparkline([]float64{10, 20}, 0); got != "" {
+		t.Fatalf("sparkline(..., 0) = %q, want empty", got)
+	}
+
+	s := sparkline([]float64{0, 50, 100}, 10)
+	if utf8.RuneCountInString(s) != 3 {
+		t.Fatalf("sparkline rune count = %d, want 3 (%q)", utf8.RuneCountInString(s), s)
+	}
+
+	// Bucketing when more values than width.
+	vals := make([]float64, 40)
+	for i := range vals {
+		vals[i] = float64(i + 1)
+	}
+	bucketed := sparkline(vals, 12)
+	if utf8.RuneCountInString(bucketed) != 12 {
+		t.Fatalf("bucketed sparkline rune count = %d, want 12 (%q)", utf8.RuneCountInString(bucketed), bucketed)
+	}
+}
+
+func TestResolveSettingsPrecedence(t *testing.T) {
+	saved := settings{
+		mode:    modeWords,
+		seconds: 60,
+		words:   50,
+		punct:   true,
+		nums:    true,
+	}
+
+	// No flags -> keep saved settings.
+	if got := resolveSettings(saved, map[string]bool{}, 30, 0, false, false, false); got != saved {
+		t.Fatalf("no flags: got %+v, want %+v", got, saved)
+	}
+
+	// Explicit -t switches back to time mode and overrides seconds while keeping other saved settings.
+	got := resolveSettings(saved, map[string]bool{"t": true}, 15, 0, false, false, false)
+	if got.mode != modeTime || got.seconds != 15 || got.words != 50 || !got.punct || !got.nums {
+		t.Fatalf("-t override: got %+v", got)
+	}
+
+	// Explicit -p=false overrides saved punct=true while preserving words mode.
+	got = resolveSettings(saved, map[string]bool{"p": true}, 30, 0, false, false, false)
+	if got.mode != modeWords || got.punct {
+		t.Fatalf("-p=false override: got %+v", got)
+	}
+
+	// Explicit -q selects quote mode.
+	got = resolveSettings(saved, map[string]bool{"q": true}, 30, 0, true, false, false)
+	if got.mode != modeQuote {
+		t.Fatalf("-q override: got %+v", got)
+	}
+}
+
+func TestModelUpdateKeyMsg(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	m := newModel(defaultSettings(), nil)
+
+	// Change settings before starting: Down -> words, Right -> 50, Ctrl+P -> punct, Ctrl+N -> nums.
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyDown},
+		{Type: tea.KeyRight},
+		{Type: tea.KeyCtrlP},
+		{Type: tea.KeyCtrlN},
+	} {
+		next, _ := m.Update(msg)
+		m = next.(model)
+	}
+	if m.cfg.mode != modeWords || m.cfg.words != 50 || !m.cfg.punct || !m.cfg.nums {
+		t.Fatalf("unexpected settings after keys: %+v", m.cfg)
+	}
+
+	// Type into a deterministic target and test backspace + word delete + finish.
+	m = model{
+		cfg:    settings{mode: modeWords, words: 2},
+		target: "hello world",
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("helxo")})
+	m = next.(model)
+
+	// Once started, settings keys must not restart or alter mode.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(model)
+	if m.cfg.mode != modeWords || m.input != "helxo" {
+		t.Fatalf("settings changed mid-test: cfg=%+v input=%q", m.cfg, m.input)
+	}
+
+	// Ctrl+W deletes word, then type correctly to completion.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
+	m = next.(model)
+	if m.input != "" {
+		t.Fatalf("input after Ctrl+W = %q, want empty", m.input)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
+	m = next.(model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = next.(model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("world")})
+	m = next.(model)
+
+	if !m.finished() {
+		t.Fatal("expected test to finish after typing full target")
+	}
+	if m.result.Mode != "words" || m.result.Length != 2 {
+		t.Fatalf("unexpected result metadata: %+v", m.result)
+	}
+
+	// Tab restarts cleanly.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(model)
+	if m.finished() || m.input != "" {
+		t.Fatalf("expected restart after Tab, got finished=%v input=%q", m.finished(), m.input)
+	}
+}
+
+func TestCustomModeBehavior(t *testing.T) {
+	cfg := settings{mode: modeCustom, customText: "custom typing text"}
+	m := newModel(cfg, nil)
+
+	// Settings keys are ignored in custom mode.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(model)
+	if m.cfg.mode != modeCustom || m.target != "custom typing text" {
+		t.Fatalf("custom mode altered by settings key: %+v target=%q", m.cfg, m.target)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("custom typing text")})
+	m = next.(model)
+	if !m.finished() {
+		t.Fatal("expected custom test to finish")
+	}
+	if m.result.Mode != "custom" || m.result.Length != 0 {
+		t.Fatalf("unexpected custom result: %+v", m.result)
+	}
+	out := m.results()
+	if strings.Contains(out, "first result") || strings.Contains(out, "new best") || strings.Contains(out, "best ") {
+		t.Fatalf("custom results should not show personal bests: %q", out)
+	}
+
+	// Tab keeps the custom text.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(model)
+	if m.target != "custom typing text" || m.finished() {
+		t.Fatalf("Tab in custom mode lost text or stayed finished: target=%q finished=%v", m.target, m.finished())
 	}
 }
