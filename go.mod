@@ -1,4 +1,4 @@
-module termtype
+module github.com/Abhay1006/termtype
 
 go 1.27.3
 
