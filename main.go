@@ -9,11 +9,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+var version = "dev"
 
 // visibleLines is how many lines of the text are shown at once.
 const visibleLines = 3
@@ -25,10 +28,22 @@ const (
 	modeWords
 	modeQuote
 	modeCount // number of modes, used for cycling
+	modeCustom
 )
 
 func (t testMode) String() string {
-	return [...]string{"time", "words", "quote"}[t]
+	switch t {
+	case modeTime:
+		return "time"
+	case modeWords:
+		return "words"
+	case modeQuote:
+		return "quote"
+	case modeCustom:
+		return "custom"
+	default:
+		return ""
+	}
 }
 
 var (
@@ -38,11 +53,16 @@ var (
 
 // settings is the test configuration. It survives restarts.
 type settings struct {
-	mode    testMode
-	seconds int
-	words   int
-	punct   bool
-	nums    bool
+	mode       testMode
+	seconds    int
+	words      int
+	punct      bool
+	nums       bool
+	customText string
+}
+
+func defaultSettings() settings {
+	return settings{mode: modeTime, seconds: 30, words: 25}
 }
 
 func (s settings) duration() time.Duration {
@@ -51,10 +71,14 @@ func (s settings) duration() time.Duration {
 
 // text returns the text for a new test, or n more words in time mode.
 func (s settings) text(n int) string {
-	if s.mode == modeQuote {
+	switch s.mode {
+	case modeQuote:
 		return randomQuote()
+	case modeCustom:
+		return s.customText
+	default:
+		return generateText(n, s.punct, s.nums)
 	}
-	return generateText(n, s.punct, s.nums)
 }
 
 // cycle returns the option after (dir=1) or before (dir=-1) cur.
@@ -86,6 +110,24 @@ func saveCmd(history []result) tea.Cmd {
 	}
 }
 
+var settingsSaveSeq atomic.Int64
+
+// savedSettingsMsg reports the outcome of writing config.json.
+type savedSettingsMsg struct{ err error }
+
+func saveSettingsCmd(s settings) tea.Cmd {
+	if s.mode == modeCustom {
+		return nil
+	}
+	seq := settingsSaveSeq.Add(1)
+	return func() tea.Msg {
+		if seq < settingsSaveSeq.Load() {
+			return savedSettingsMsg{}
+		}
+		return savedSettingsMsg{err: saveSettings(s)}
+	}
+}
+
 type model struct {
 	cfg    settings
 	target string
@@ -103,10 +145,11 @@ type model struct {
 	missedKeys  map[rune]int // target rune -> mistake count (persists across backspace)
 	missedWords map[int]int  // word index in target -> mistake count
 
-	history []result // all saved results, shared across restarts
-	result  result   // this test's result, once finished
-	summary summary  // result compared with history, once finished
-	saveErr error
+	history     []result // all saved results, shared across restarts
+	result      result   // this test's result, once finished
+	summary     summary  // result compared with history, once finished
+	saveErr     error
+	settingsErr error
 }
 
 func (m model) Init() tea.Cmd {
@@ -121,6 +164,7 @@ func (m model) restart(cfg settings) model {
 	nm.height = m.height
 	nm.id = m.id + 1
 	nm.saveErr = m.saveErr
+	nm.settingsErr = m.settingsErr
 	return nm
 }
 
@@ -132,6 +176,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case savedMsg:
 		m.saveErr = msg.err
+		return m, nil
+	case savedSettingsMsg:
+		m.settingsErr = msg.err
 		return m, nil
 	case tickMsg:
 		if msg.id != m.id || m.finished() {
@@ -157,7 +204,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Settings can only be changed before the test starts.
 		if wasIdle {
 			if cfg, ok := m.changeSettings(msg); ok {
-				return m.restart(cfg), nil
+				var cmd tea.Cmd
+				if cfg != m.cfg {
+					cmd = saveSettingsCmd(cfg)
+				}
+				return m.restart(cfg), cmd
 			}
 		}
 
@@ -195,6 +246,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // changeSettings handles the keys that change the test before it starts.
 // It reports false if msg is not one of them.
 func (m model) changeSettings(msg tea.KeyMsg) (settings, bool) {
+	if m.cfg.mode == modeCustom {
+		return m.cfg, false
+	}
 	cfg := m.cfg
 	switch msg.Type {
 	case tea.KeyDown:
@@ -317,15 +371,17 @@ func (m model) finish(end time.Time) (model, tea.Cmd) {
 	case modeWords:
 		m.result.Length = m.cfg.words
 	}
-	if m.cfg.mode != modeQuote {
+	if m.cfg.mode != modeQuote && m.cfg.mode != modeCustom {
 		m.result.Punct = m.cfg.punct
 		m.result.Numbers = m.cfg.nums
 	}
-	m.summary = summarize(m.history, m.result)
+	if m.cfg.mode != modeCustom {
+		m.summary = summarize(m.history, m.result)
+	}
 	// Clip so the append copies instead of writing into a slice that an
 	// older model (or the save in progress) might still be using.
 	m.history = append(slices.Clip(m.history), m.result)
-	return m, saveCmd(m.history)
+	return m, tea.Batch(saveCmd(m.history), saveSettingsCmd(m.cfg))
 }
 
 func (m model) finished() bool {
@@ -426,6 +482,9 @@ func pick(s string, on bool) string {
 
 // modeBar shows the test settings before the test starts.
 func (m model) modeBar() string {
+	if m.cfg.mode == modeCustom {
+		return statsStyle.Render("custom") + "  " + pendingStyle.Render(fmt.Sprintf("%d words", m.totalWords()))
+	}
 	sep := pendingStyle.Render("│")
 	var parts []string
 	for mode := range modeCount {
@@ -453,10 +512,10 @@ func (m model) modeBar() string {
 
 func formatModeLabel(mode string, length int, punct, nums bool) string {
 	label := mode
-	if mode != "quote" && length > 0 {
+	if mode != "quote" && mode != "custom" && length > 0 {
 		label += " " + strconv.Itoa(length)
 	}
-	if mode != "quote" {
+	if mode != "quote" && mode != "custom" {
 		if punct {
 			label += " · punctuation"
 		}
@@ -572,19 +631,21 @@ func (m model) results() string {
 			"    " + label("time ") + statsStyle.Render(fmt.Sprintf("%.1fs", m.elapsed().Seconds())),
 	}
 
-	s := m.summary
-	switch {
-	case s.newBest(r):
-		lines = append(lines, correctStyle.Bold(true).Render("new best!")+
-			label(fmt.Sprintf("  (previous %.0f)", s.prevBest)))
-	case !s.hasPrev:
-		lines = append(lines, label("first result for this mode"))
-	default:
-		lines = append(lines, label("best ")+num(s.prevBest)+
-			"    "+label(fmt.Sprintf("avg of last %d ", s.avgCount))+num(s.avg))
-	}
-	if s.newBest(r) && s.avgCount > 1 {
-		lines[len(lines)-1] += "    " + label(fmt.Sprintf("avg of last %d ", s.avgCount)) + num(s.avg)
+	if m.cfg.mode != modeCustom {
+		s := m.summary
+		switch {
+		case s.newBest(r):
+			lines = append(lines, correctStyle.Bold(true).Render("new best!")+
+				label(fmt.Sprintf("  (previous %.0f)", s.prevBest)))
+		case !s.hasPrev:
+			lines = append(lines, label("first result for this mode"))
+		default:
+			lines = append(lines, label("best ")+num(s.prevBest)+
+				"    "+label(fmt.Sprintf("avg of last %d ", s.avgCount))+num(s.avg))
+		}
+		if s.newBest(r) && s.avgCount > 1 {
+			lines[len(lines)-1] += "    " + label(fmt.Sprintf("avg of last %d ", s.avgCount)) + num(s.avg)
+		}
 	}
 
 	if len(m.samples) >= 2 {
@@ -750,13 +811,20 @@ func (m model) View() string {
 		out.WriteString(errorStyle.Render("could not save history: " + m.saveErr.Error()))
 		out.WriteString("\n\n")
 	}
-	if m.start.IsZero() && m.cfg.mode == modeQuote {
+	if m.settingsErr != nil {
+		out.WriteString(errorStyle.Render("could not save settings: " + m.settingsErr.Error()))
+		out.WriteString("\n\n")
+	}
+	switch {
+	case m.start.IsZero() && m.cfg.mode == modeCustom:
+		out.WriteString(pendingStyle.Render("tab restart • esc quit"))
+	case m.start.IsZero() && m.cfg.mode == modeQuote:
 		out.WriteString(pendingStyle.Render("←/→ new quote • ↑/↓ mode • tab restart • esc quit"))
-	} else if m.start.IsZero() {
+	case m.start.IsZero():
 		out.WriteString(pendingStyle.Render("←/→ length • ↑/↓ mode • ctrl+p punctuation • ctrl+n numbers"))
 		out.WriteString("\n")
 		out.WriteString(pendingStyle.Render("tab restart • esc quit"))
-	} else {
+	default:
 		out.WriteString(pendingStyle.Render("tab to restart • esc to quit"))
 	}
 
@@ -777,7 +845,7 @@ func fail(format string, args ...any) {
 	os.Exit(2)
 }
 
-func initTheme(themeFlag string) {
+func initTheme(themeFlag string) config {
 	conf, err := loadConfig()
 	if err != nil {
 		fail("reading config: %v", err)
@@ -791,6 +859,30 @@ func initTheme(themeFlag string) {
 		fail("%v", err)
 	}
 	applyTheme(t)
+	return conf
+}
+
+func resolveSettings(base settings, setFlags map[string]bool, seconds, words int, quote, punct, nums bool) settings {
+	cfg := base
+	if setFlags["p"] {
+		cfg.punct = punct
+	}
+	if setFlags["n"] {
+		cfg.nums = nums
+	}
+	if setFlags["t"] {
+		cfg.seconds = seconds
+	}
+	switch {
+	case setFlags["q"] && quote:
+		cfg.mode = modeQuote
+	case setFlags["w"] && words > 0:
+		cfg.mode = modeWords
+		cfg.words = words
+	case setFlags["t"]:
+		cfg.mode = modeTime
+	}
+	return cfg
 }
 
 func runStats(themeFlag string) {
@@ -812,27 +904,73 @@ func main() {
 	}
 
 	seconds := flag.Int("t", 30, "test length in seconds (time mode)")
-	words := flag.Int("w", 0, "number of words; switches to words mode")
+	wordsFlag := flag.Int("w", 0, "number of words; switches to words mode")
 	quote := flag.Bool("q", false, "type a quote instead of random words")
 	punct := flag.Bool("p", false, "add punctuation and capital letters")
 	nums := flag.Bool("n", false, "add numbers")
+	filePath := flag.String("file", "", "type text from a file (use - for stdin)")
+	wordsFilePath := flag.String("words-file", "", "word list file for time and words modes")
 	themeName := flag.String("theme", "", "colour theme: "+themeNames())
 	showStats := flag.Bool("stats", false, "show stats from history and exit")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println("termtype " + version)
+		return
+	}
 	if *showStats {
 		runStats(*themeName)
 		return
 	}
 
-	if *seconds <= 0 || *words < 0 {
+	setFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		setFlags[f.Name] = true
+	})
+
+	if *seconds <= 0 || *wordsFlag < 0 {
 		fail("-t must be > 0 and -w must be >= 0")
 	}
-	if *quote && *words > 0 {
+	if *quote && *wordsFlag > 0 {
 		fail("-q and -w can't be used together")
 	}
+	if *filePath != "" && *wordsFilePath != "" {
+		fail("-file and -words-file can't be used together")
+	}
+	if *filePath != "" && (*quote || *wordsFlag > 0 || setFlags["t"]) {
+		fail("-file can't be used with -t, -w or -q")
+	}
 
-	initTheme(*themeName)
+	conf := initTheme(*themeName)
+
+	if *wordsFilePath != "" {
+		loadedWords, err := loadWordsFile(*wordsFilePath)
+		if err != nil {
+			fail("reading words file: %v", err)
+		}
+		words = loadedWords
+	}
+
+	var cfg settings
+	programOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	if *filePath != "" {
+		customText, err := readCustomText(*filePath, os.Stdin)
+		if err != nil {
+			fail("reading text: %v", err)
+		}
+		if *filePath == "-" {
+			tty, err := os.Open("/dev/tty")
+			if err != nil {
+				fail("opening /dev/tty: %v", err)
+			}
+			defer tty.Close()
+			programOpts = append(programOpts, tea.WithInput(tty))
+		}
+		cfg = settings{mode: modeCustom, customText: customText}
+	} else {
+		cfg = resolveSettings(conf.toSettings(), setFlags, *seconds, *wordsFlag, *quote, *punct, *nums)
+	}
 
 	history, err := loadHistory()
 	if err != nil {
@@ -840,16 +978,7 @@ func main() {
 		fail("reading history: %v", err)
 	}
 
-	cfg := settings{mode: modeTime, seconds: *seconds, words: 25, punct: *punct, nums: *nums}
-	switch {
-	case *quote:
-		cfg.mode = modeQuote
-	case *words > 0:
-		cfg.mode = modeWords
-		cfg.words = *words
-	}
-
-	p := tea.NewProgram(newModel(cfg, history), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(cfg, history), programOpts...)
 	if _, err := p.Run(); err != nil {
 		fmt.Println("error:", err)
 		os.Exit(1)

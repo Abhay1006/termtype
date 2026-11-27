@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -39,12 +40,24 @@ func themeNames() string {
 //
 //	{
 //	  "theme": "ocean",
-//	  "colors": { "accent": "#ffcc00" }
+//	  "colors": { "accent": "#ffcc00" },
+//	  "mode": "time",
+//	  "seconds": 30,
+//	  "words": 25,
+//	  "punctuation": false,
+//	  "numbers": false
 //	}
 type config struct {
-	Theme  string `json:"theme"`
-	Colors theme  `json:"colors"` // overrides single colours of the theme
+	Theme   string `json:"theme,omitempty"`
+	Colors  theme  `json:"colors,omitzero"` // overrides single colours of the theme
+	Mode    string `json:"mode,omitempty"`
+	Seconds int    `json:"seconds,omitempty"`
+	Words   int    `json:"words,omitempty"`
+	Punct   bool   `json:"punctuation,omitempty"`
+	Numbers bool   `json:"numbers,omitempty"`
 }
+
+var configMu sync.Mutex
 
 func configPath() (string, error) {
 	dir, err := configDir()
@@ -72,6 +85,55 @@ func loadConfig() (config, error) {
 		return c, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
+}
+
+// toSettings returns the saved test settings, falling back to defaults for
+// any unset or invalid fields.
+func (c config) toSettings() settings {
+	s := defaultSettings()
+	switch c.Mode {
+	case "time":
+		s.mode = modeTime
+	case "words":
+		s.mode = modeWords
+	case "quote":
+		s.mode = modeQuote
+	}
+	if c.Seconds > 0 {
+		s.seconds = c.Seconds
+	}
+	if c.Words > 0 {
+		s.words = c.Words
+	}
+	s.punct = c.Punct
+	s.nums = c.Numbers
+	return s
+}
+
+// saveSettings persists s into config.json while preserving existing theme
+// and colour settings.
+func saveSettings(s settings) error {
+	if s.mode == modeCustom {
+		return nil
+	}
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	c, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	c.Mode = s.mode.String()
+	c.Seconds = s.seconds
+	c.Words = s.words
+	c.Punct = s.punct
+	c.Numbers = s.nums
+
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	return writeJSON(path, c)
 }
 
 // resolveTheme picks the named theme (default if empty) and applies the
