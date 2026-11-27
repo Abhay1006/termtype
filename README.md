@@ -1,5 +1,7 @@
 # termtype
 
+[![CI](https://github.com/Abhay1006/termtype/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhay1006/termtype/actions/workflows/ci.yml)
+
 A minimal, fast typing test for the terminal, written in Go with
 [Bubble Tea](https://github.com/charmbracelet/bubbletea) and
 [Lip Gloss](https://github.com/charmbracelet/lipgloss).
@@ -27,7 +29,20 @@ with no runtime dependencies.
 
 ## Installation
 
-You need [Go](https://go.dev/dl/) 1.27 or newer.
+### Download a binary
+
+Prebuilt binaries for Linux, macOS and Windows (`amd64` and `arm64`) are
+available on the [Releases](https://github.com/Abhay1006/termtype/releases) page.
+
+### With Go
+
+You need [Go](https://go.dev/dl/) 1.27 or newer:
+
+```sh
+go install github.com/Abhay1006/termtype@latest
+```
+
+### From source
 
 ```sh
 git clone https://github.com/Abhay1006/termtype.git
@@ -45,28 +60,34 @@ mv termtype ~/.local/bin/
 ## Usage
 
 ```sh
-termtype              # 30 second time test
-termtype -t 60        # 60 second time test
-termtype -w 50        # 50 word test
-termtype -q           # quote test
-termtype -p -n        # add punctuation and numbers
-termtype -theme ocean # use a different colour theme
-termtype stats        # show test history and personal bests
+termtype                    # start with your last used settings (default: 30s time)
+termtype -t 60              # 60 second time test
+termtype -w 50              # 50 word test
+termtype -q                 # quote test
+termtype -p -n              # add punctuation and numbers
+termtype -file notes.txt    # type text from a file
+cat notes.txt | termtype -file -  # type text from stdin
+termtype -words-file kw.txt # use a custom word list
+termtype -theme ocean       # use a different colour theme
+termtype stats              # show test history and personal bests
 ```
 
 ### Flags
 
-| Flag          | Description                                         | Default   |
-| ------------- | --------------------------------------------------- | --------- |
-| `-t <sec>`    | Test length in seconds (time mode)                  | `30`      |
-| `-w <n>`      | Number of words; switches to words mode             | off       |
-| `-q`          | Type a quote instead of random words                | off       |
-| `-p`          | Add punctuation and capital letters                 | off       |
-| `-n`          | Add numbers                                         | off       |
-| `-theme <name>` | Colour theme: `default`, `forest`, `mono`, `ocean`, `warm` | `default` |
-| `-stats`      | Show stats from history and exit (same as `termtype stats`) | off |
+| Flag               | Description                                                 | Default   |
+| ------------------ | ----------------------------------------------------------- | --------- |
+| `-t <sec>`         | Test length in seconds (time mode)                          | `30`      |
+| `-w <n>`           | Number of words; switches to words mode                     | off       |
+| `-q`               | Type a quote instead of random words                        | off       |
+| `-p`               | Add punctuation and capital letters                         | off       |
+| `-n`               | Add numbers                                                 | off       |
+| `-file <path>`     | Type text from a file (use `-` for stdin)                   | off       |
+| `-words-file <path>` | Replace the built-in word list for time and words modes   | off       |
+| `-theme <name>`    | Colour theme: `default`, `forest`, `mono`, `ocean`, `warm`  | `default` |
+| `-stats`           | Show stats from history and exit (same as `termtype stats`) | off       |
+| `-version`         | Print version and exit                                      | off       |
 
-`-q` and `-w` can't be used together.
+`-q` and `-w` can't be used together. `-file` can't be used with `-t`, `-w`, `-q` or `-words-file`.
 
 ### Controls
 
@@ -110,6 +131,8 @@ termtype stores its files in your user config directory:
 
 Every field is optional. Colours can be ANSI colour numbers (`"10"`) or hex
 values (`"#a3be8c"`), and any colour you set overrides the chosen theme.
+termtype also saves your last used mode, length, punctuation and numbers
+settings here automatically (command-line flags always take precedence).
 
 ```json
 {
@@ -119,7 +142,12 @@ values (`"#a3be8c"`), and any colour you set overrides the chosen theme.
     "wrong": "#ff5874",
     "pending": "#5f7e97",
     "accent": "#ffcc00"
-  }
+  },
+  "mode": "time",
+  "seconds": 30,
+  "words": 25,
+  "punctuation": false,
+  "numbers": false
 }
 ```
 
